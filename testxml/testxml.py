@@ -2,6 +2,7 @@
 # -*- coding: utf8 -*-
 #
 # Copyright (C) 2010-2011  Evol Online
+# Author: Andrei Karas (4144)
 
 import array
 import base64
@@ -22,7 +23,7 @@ filtxmls = re.compile(".+[.]xml", re.IGNORECASE)
 filtogg = re.compile(".+[.]ogg", re.IGNORECASE)
 dyesplit1 = re.compile(";")
 dyesplit2 = re.compile(",")
-parentDir = "../../clientdata"
+parentDir = "../../privclientdata"
 iconsDir = "graphics/items/"
 spritesDir = "graphics/sprites/"
 particlesDir = "graphics/particles/"
@@ -41,6 +42,7 @@ warnings = 0
 errDict = set()
 safeDye = False
 borderSize = 20
+colorsList = set()
 
 testBadCollisions = False
 # number of tiles difference. after this amount tiles can be counted as incorrect
@@ -271,7 +273,7 @@ def testDyeMark(file, color, text, iserr):
 	return len(colors)
 
 
-def testSprites(id, node, checkGender, iserr):
+def testSprites(id, node, checkGender, isNormalDye, iserr):
 	try:
 		tmp = node.getElementsByTagName("nosprite")
 		if tmp is not None and len(tmp) > 1:
@@ -309,7 +311,7 @@ def testSprites(id, node, checkGender, iserr):
 			except:
 				variant = 0
 
-			testSprite(id, file, variant, iserr)
+			testSprite(id, file, variant, isNormalDye, iserr)
 		else:
 			male = False
 			female = False
@@ -337,7 +339,7 @@ def testSprites(id, node, checkGender, iserr):
 					variant = int(sprite.attributes["variant"].value)
 				except:
 					variant = 0
-				testSprite(id, file, variant, iserr)
+				testSprite(id, file, variant, isNormalDye, iserr)
 			if checkGender:
 				if male == False:
 					showMsg(id, "no male sprite tag", "",iserr)
@@ -345,7 +347,8 @@ def testSprites(id, node, checkGender, iserr):
 					showMsg(id, "no female sprite tag", "", iserr)
 
 
-def testSprite(id, file, variant, iserr):
+def testSprite(id, file, variant, isNormalDye, iserr):
+	global safeDye
 	tmp = splitImage(file)
 	color = tmp[1]
 	file2 = tmp[0]
@@ -358,7 +361,14 @@ def testSprite(id, file, variant, iserr):
 	if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
 		showFileMsgById(id, spritesDir, file2, iserr)
 	else:
+		if not isNormalDye and color is not None and len(color) > 0:
+			showMsg(id, "sprite tag have dye string but it should not, because used colors dye", color, iserr)
+
+		oldSafe = safeDye
+		safeDye = True
 		testSpriteFile(id, fullPath, file, spritesDir + file2, dnum, variant, iserr)
+		safeDye = oldSafe
+
 
 def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 	global safeDye
@@ -372,12 +382,12 @@ def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 		return
 
 	try:
-		variants = dom.attributes["variants"].value
+		variants = dom.documentElement.attributes["variants"].value
 	except:
 		variants = 0
 
 	try:
-		variant_offset = dom.attributes["variant_offset"].value
+		variant_offset = dom.documentElement.attributes["variant_offset"].value
 	except:
 		variant_offset = 0
 		
@@ -518,6 +528,7 @@ def testSpriteAction(file, name, action, numframes, iserr):
 		lastOffsetX = 0
 		lastOffsetY = 0
 		cnt = 0
+		labels = set()
 
 		for node2 in animation.childNodes:
 			if node2.nodeName == "frame" or node2.nodeName == "sequence":
@@ -564,6 +575,10 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				except:
 					showMsgSprite(file, "no sequence start or end index action: " + \
 							name + ", direction: " + direction, iserr)
+				try:
+					repeat = int(sequence.attributes["repeat"].value)
+				except:
+					repeat = 1
 					
 				if i1 >= numframes or i1 < 0:
 					showMsgSprite(file, "incorrect start sequence index " + str(i1) + \
@@ -578,7 +593,7 @@ def testSpriteAction(file, name, action, numframes, iserr):
 
 				if lastIndex1 == i1 and lastIndex2 == i2 and offsetX == lastOffsetX \
 				and offsetY == lastOffsetY:
-					showMsgSprite(file, "duplicate sequence animation for start=" \
+					showMsgSprite(file, "duplicate sequence animation. May be need use repeat attribue? for start=" \
 							+ str(i1) + ", end=" + str(i2) + " action: " + \
 							name + ", direction: " + direction, False)
 				else:
@@ -590,6 +605,43 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				cnt = cnt + 1
 				for i in range(i1,i2 + 1):
 					framesid.add(i)
+			elif node2.nodeName == "end" or node2.nodeName == "jump" or node2.nodeName == "label" or node2.nodeName == "goto":
+				lastIndex1 = -1
+				lastIndex2 = -1
+				lastOffsetX = 0
+				lastOffsetY = 0
+				cnt = cnt + 1
+			elif node2.nodeName == "#text" or node2.nodeName == "#comment":
+				None
+			else:
+				showMsgSprite(file, "unknown animation tag: " + node2.nodeName + ", " + name, False)
+
+			if node2.nodeName == "jump":
+				try:
+					jaction = node2.attributes["action"].value
+				except:
+					jaction = ""
+				if jaction == "" or jaction is None:
+					showMsgSprite(file, "no action attribute in jump tag " + name, iserr)
+			elif node2.nodeName == "label":
+				try:
+					label = node2.attributes["name"].value
+				except:
+					label = ""
+				if label == "" or label is None:
+					showMsgSprite(file, "no name attribute in label tag " + name, iserr)
+				else:
+					if label in labels:
+						showMsgSprite(file, "duplicate label " + label + " " + name, iserr)
+					else:
+						labels.add(label)
+			elif node2.nodeName == "goto":
+				try:
+					label = node2.attributes["label"].value
+				except:
+					label = ""
+				if label == "" or label is None:
+					showMsgSprite(file, "no label attribute in goto tag " + name, iserr)
 
 		if cnt == 0:
 			showMsgSprite(file, "no frames or sequences in action: " + name, iserr)
@@ -656,9 +708,10 @@ def testImageFile(file, fullPath, sz, src, iserr):
 
 	return sizes	
 
-def testSound(file):
+def testSound(file, sfxDir):
 	fullPath = parentDir + "/" + sfxDir + file
 	if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
+		print "errin:" + fullPath
 		showMsgFile(file, "sound file not found", True)
 		return
 	try:
@@ -719,8 +772,21 @@ def testItems(fileName, imgDir):
 	print "Checking items.xml"
 	dom = minidom.parse(parentDir + fileName)
 	idset = set()
+	oldId = None
 	for node in dom.getElementsByTagName("item"):
-		id = node.attributes["id"].value
+		if node.parentNode != dom.documentElement:
+			continue
+
+		try:
+			id = node.attributes["id"].value
+		except:
+			if oldId is None:
+				print "error: item without id"
+			else:
+				print "error: item without id. Last id was: " + oldId
+			errors = errors + 1
+			continue
+		oldId = id
 		if id in idset:
 			print "error: duplicated id=" + id
 			errors = errors + 1
@@ -728,6 +794,13 @@ def testItems(fileName, imgDir):
 			idset.add(id)
 			
 		idI = int(id)
+
+		try:
+			colors = node.attributes["colors"].value
+		except:
+			colors = None
+
+
 		try:
 			type = node.attributes["type"].value
 		except:
@@ -766,6 +839,21 @@ def testItems(fileName, imgDir):
 		except:
 			missile = ""
 
+		try:
+			drawBefore = node.attributes["drawBefore"].value
+		except:
+			drawBefore = ""
+
+		try:
+			drawAfter = node.attributes["drawAfter"].value
+		except:
+			drawAfter = ""
+
+		try:
+			drawPriority = int(node.attributes["drawPriority"].value)
+		except:
+			drawPriority = 0
+			
 
 		if type == "hairsprite":
 			if idI >= 0:
@@ -776,7 +864,7 @@ def testItems(fileName, imgDir):
 				errors = errors + 1
 
 			safeDye = True
-			testSprites(id, node, True, True)
+			testSprites(id, node, True, True, True)
 			safeDye = False
 
 		elif type == "racesprite":
@@ -797,10 +885,22 @@ def testItems(fileName, imgDir):
 				errors = errors + 1
 				continue
 			elif len(imagecolor) > 0:
-				testDye(id, imagecolor, "image=" + image0, "items.xml", True)
+				if colors is None:
+					testDye(id, imagecolor, "image=" + image0, "items.xml", True)
+				else:
+					testDyeMark(id, imagecolor, "image=" + image0, True)
+					if colors not in colorsList:
+						print "error: colors value " + colors + " not found in itemcolors.xml"
+						errors = errors + 1
 
 			if floorcolor != None and len(floorcolor) > 0:
-				testDye(id, floorcolor, "floor=" + floor0, "items.xml", True)
+				if colors is None:
+					testDye(id, floorcolor, "floor=" + floor0, "items.xml", True)
+				else:
+					testByeMark(id, imagecolor, "floor=" + floor0, True);
+					if colors not in colorsList:
+						print "error: colors value " + colors + " not found in itemcolors.xml"
+						errors = errors + 1
 
 			if description == "":
 				print "warn: missing description attribute on id=" + id
@@ -819,7 +919,7 @@ def testItems(fileName, imgDir):
 					print "error: found attribute floor and tag floor. " + \
 							"Should be only one tag or attribute. id=" + id
 					errors = errors + 1
-				testSprites(id, floorSprite, False, err)
+				testSprites(id, floorSprite, False, colors is None, err)
 
 			fullPath = os.path.abspath(parentDir + "/" + imgDir + image)
 			if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
@@ -836,18 +936,56 @@ def testItems(fileName, imgDir):
 				else:
 					testImageFile(imgDir + floor, fullPath, 0, "", True)
 
+			testItemReplace(id, node, "replace")
+			if drawBefore != "":
+				checkSpriteName(id, drawBefore)
+			if drawAfter != "":
+				checkSpriteName(id, drawAfter)
+				
 
 			if type != "usable" and type != "unusable" and type != "generic" \
 			and type != "equip-necklace" and type != "equip-1hand" \
 			and type != "equip-2hand" and type != "equip-ammo" \
 			and type != "equip-charm" and type != "equip-neck":
 				err = type != "equip-shield"
-				testSprites(id, node, True, err)
+				testSprites(id, node, True, colors is None, err)
 		elif type == "other":
 			None
 		elif type != "":
 			print "warn: unknown type '" + type + "' for id=" + id
 			warnings = warnings + 1
+
+
+def testItemReplace(id, rootNode, name):
+	global warnings, errors
+	sprites = set()
+	for node in rootNode.getElementsByTagName(name):
+		if node.parentNode != rootNode:
+			continue
+		try:
+			sprite = node.attributes["sprite"].value
+		except:
+			print "error: reading replace sprite name, id=" + str(id)
+			continue
+		checkSpriteName(id, sprite)
+		for itemNode in node.getElementsByTagName("item"):
+			if itemNode.parentNode != node:
+				continue
+			#TODO here need check "from" and "to" for correct item id
+
+
+def checkSpriteName(id, name):
+	global warnings, errors
+	if name != "shoes" and name != "boot" and name != "boots" and name != "bottomclothes" \
+			and name != "bottom" and name != "pants" and name != "topclothes" and \
+			name != "top" and name != "torso" and name != "body" and name != "misc1" \
+			and name != "misc2" and name != "scarf" and name != "scarfs" and \
+			name != "hair" and name != "hat" and name != "hats" and name != "wings" \
+			and name != "glove" and name != "gloves" and name != "weapon" and \
+			name != "weapons" and name != "shield" and name != "shields" and \
+			name != "amulet" and name != "amulets" and name != "ring" and name != "rings":
+				print "error: unknown sprite name " + name + ", id=" + str(id)
+
 
 def testMonsters(fileName):
 	global warnings, errors
@@ -875,7 +1013,7 @@ def testMonsters(fileName):
 			name = ""
 
 		testTargetCursor(id, node, fileName)
-		testSprites(id, node, False, True)
+		testSprites(id, node, False, True, True)
 		testSounds(id, node, "monster")
 		testParticles(id, node, "particlefx", fileName)
 
@@ -910,7 +1048,8 @@ def testSounds(id, node, type):
 			errors = errors + 1
 
 		if type == "monster":
-			if event != "hit" and event != "miss" and event != "hurt" and event != "die":
+			if event != "hit" and event != "miss" and event != "hurt" and event != "die" \
+					and event != "move" and event != "sit" and event != "spawn":
 				print "error: incorrect sound event name " + event + " in id=" + id
 				errors = errors + 1
 		elif type == "item":
@@ -918,7 +1057,7 @@ def testSounds(id, node, type):
 				print "error: incorrect sound event name " + event + " in id=" + id
 				errors = errors + 1
 
-		testSound(sound.childNodes[0].data)
+		testSound(sound.childNodes[0].data, sfxDir)
 
 def testNpcs(file):
 	global warnings, errors
@@ -938,7 +1077,7 @@ def testNpcs(file):
 		else:
 			idset.add(id)
 
-		testSprites(id, node, False, True)
+		testSprites(id, node, False, True, True)
 		testParticles(id, node, "particlefx", file)
 
 def readAttrI(node, attr, dv, msg, iserr):
@@ -1072,6 +1211,7 @@ def testMap(file, path):
 		tilesMap[tile.firstGid] = tile
 					
 
+	testTiles(file, tilesMap)
 	layers = dom.getElementsByTagName("layer")
 	if layers == None or len(layers) == 0:
 		showMsgFile(file, "map dont have layers", True)
@@ -1159,6 +1299,20 @@ def testMap(file, path):
 		showLayerErrors(file, warn1, "empty tile in lower layers", False)
 	if err1 != None and len(err1) > 0:
 		showLayerErrors(file, err1, "empty tile in all layers", True)
+
+
+def testTiles(file, tilesMap):
+	for firstGid in tilesMap:
+		for gid2 in tilesMap:
+			if firstGid != gid2:
+				tile1 = tilesMap[firstGid]
+				tile2 = tilesMap[gid2]
+				if (tile1.firstGid >= tile2.firstGid and tile1.firstGid <= tile2.lastGid) or \
+					(tile1.lastGid >= tile2.firstGid and tile1.lastGid <= tile2.lastGid):
+						showMsgFile(file, "overlaping tilesets gids \"" + tile1.name \
+								+ "\" and \"" + tile2.name + "\"", True)
+
+
 
 
 def reportAboutTiles(file, data):
@@ -1436,8 +1590,8 @@ def testMaps(dir):
 
 def testDefaultFiles():
 	print "Checking defult files"
-	testSound(attackSfxFile)
-	testSprite("0", spriteErrorFile, 0, True)
+	testSound(attackSfxFile, sfxDir)
+	testSprite("0", spriteErrorFile, 0, True, True)
 	testParticle("0", particlesDir + levelUpEffectFile, "levelUpEffectFile")
 	testParticle("0", particlesDir + portalEffectFile, "portalEffectFile")
 	fullName = parentDir + "/" + wallpapersDir + wallpaperFile
@@ -1496,7 +1650,7 @@ def testSpritesDir(dir):
 		elif filtxmls.search(file):
 			fullName = dir + file
 			safeDye = True
-			testSprite("0", dir + file, 0, True)
+			testSprite("0", dir + file, 0, True, True)
 			safeDye = False
 
 
@@ -1522,6 +1676,7 @@ def testParticlesDir(dir):
 			testParticle("0", dir + file, "")
 			safeDye = False
 
+
 def testSoundsDir(dir, sfxDir):
 	global errors, warnings
 
@@ -1538,8 +1693,65 @@ def testSoundsDir(dir, sfxDir):
 			testSoundsDir(dir + file + "/", sfxDir)
 		elif filtogg.search(file):
 			fullName = dir + file
-			testSound(dir + file)
+			testSound(dir + file, sfxDir)
 
+
+def testItemColors(fileName):
+	global warnings, errors, safeDye, colorLists
+	print "Checking itemcolors.xml"
+	try:
+		dom = minidom.parse(parentDir + fileName)
+	except:
+		return
+
+	for node in dom.getElementsByTagName("list"):
+		if node.parentNode != dom.documentElement:
+			continue
+
+		try:
+			name = node.attributes["name"].value
+		except:
+			print "error: colors list dont have name"
+			errors = errors + 1
+			continue
+		if name in colorsList:
+			print "error: duplicate color list: " + name
+			errors = errors + 1
+			continue
+		colorsList.add(name)
+		colors = set()
+		names = set()
+		for colorNode in node.getElementsByTagName("color"):
+			if colorNode.parentNode != node:
+				continue
+			try:
+				id = colorNode.attributes["id"].value
+			except:
+				print "error: getting id in list: " + name
+				errors = errors + 1
+				continue
+			try:
+				colorName = colorNode.attributes["name"].value
+			except:
+				print "error: getting name in list: " + name
+				errors = errors + 1
+				continue
+			try:
+				colorDye = colorNode.attributes["value"].value
+			except:
+				print "error: getting color in list: " + name
+				errors = errors + 1
+			if id in colors:
+				print "error: color with id " + str(id) + " already in list: " + name
+				errors = errors + 1
+			else:
+				colors.add(id)
+			if colorName in names:
+				print "error: color with name \"" + colorName + "\" already in list: " + name
+				errors = errors + 1
+			else:
+				names.add(colorName)
+			testDyeColors(id, colorDye, colorDye, name, True)
 
 def haveXml(dir):
 	if not os.path.isdir(dir) or not os.path.exists(dir):
@@ -1570,6 +1782,7 @@ print "Checking xml file syntax"
 enumDirs(parentDir)
 loadPaths()
 testDefaultFiles()
+testItemColors("/itemcolors.xml")
 testItems("/items.xml", iconsDir)
 testMonsters("/monsters.xml")
 testNpcs("/npcs.xml")
