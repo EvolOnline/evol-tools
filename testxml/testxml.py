@@ -11,19 +11,22 @@ import os
 import re
 import datetime
 import xml
+import csv
 import ogg.vorbis
+import StringIO
+import sys
 from xml.dom import minidom
 from PIL import Image
 import zlib
 
-filt = re.compile(".+[.](xml|tmx)", re.IGNORECASE)
+filt = re.compile(".+[.](xml|tmx|tsx)", re.IGNORECASE)
 filtmaps = re.compile(".+[.]tmx", re.IGNORECASE)
 filtimages = re.compile(".+[.]png", re.IGNORECASE)
 filtxmls = re.compile(".+[.]xml", re.IGNORECASE)
 filtogg = re.compile(".+[.]ogg", re.IGNORECASE)
 dyesplit1 = re.compile(";")
 dyesplit2 = re.compile(",")
-parentDir = "../../privclientdata"
+parentDir = "../../gittorious/clientdata-beta"
 iconsDir = "graphics/items/"
 spritesDir = "graphics/sprites/"
 particlesDir = "graphics/particles/"
@@ -43,6 +46,7 @@ errDict = set()
 safeDye = False
 borderSize = 20
 colorsList = set()
+showAll = False
 
 testBadCollisions = False
 # number of tiles difference. after this amount tiles can be counted as incorrect
@@ -147,28 +151,51 @@ def enumDirs(parentDir):
 		file2 = os.path.abspath(parentDir + os.path.sep + file1)
 		if not os.path.isfile(file2):
 			enumDirs(file2)
-		elif filt.search(file1):
-			try:
-				minidom.parse(file2)
-			except xml.parsers.expat.ExpatError as err:
-				print "error: " + file2 + ", line=" + str(err.lineno) + ", char=" + str(err.offset)
-				errors = errors + 1
+		else:
+			if filt.search(file1):
+				try:
+					minidom.parse(file2)
+				except xml.parsers.expat.ExpatError as err:
+					print "error: " + file2 + ", line=" + str(err.lineno) + ", char=" + str(err.offset)
+					errors = errors + 1
+			if file1 != "testxml.py":
+				checkFilePermission(file2)
+
+def checkFilePermission(fullName):
+	if os.access(fullName, os.X_OK):
+		print "warn: execute flag on file: " + fullName
+
 
 def loadPaths():
-	global warnings
+	global warnings, iconsDir, spritesDir, sfxDir, particlesDir, mapsDir, attackSfxFile, spriteErrorFile, \
+			levelUpEffectFile, portalEffectFile, minimapsDir, wallpapersDir, walpaperFile, \
+			musicDir
 	try:
 		dom = minidom.parse(parentDir + "/paths.xml")
 		for node in dom.getElementsByTagName("option"):
 			if node.attributes["name"].value == "itemIcons":
 				iconsDir = node.attributes["value"].value
+				if iconsDir != "graphics/items/":
+					print "warn: itemIcons path has not default value."\
+							" Will be incampatible with old clients."
 			elif node.attributes["name"].value == "sprites":
 				spritesDir = node.attributes["value"].value
+				if spritesDir != "graphics/sprites/":
+					print "warn: sprites path has not default value."\
+							" Will be incampatible with old clients."
 			elif node.attributes["name"].value == "sfx":
 				sfxDir = node.attributes["value"].value
+
 			elif node.attributes["name"].value == "particles":
 				particlesDir = node.attributes["value"].value
+				if particlesDir != "graphics/particles/":
+					print "warn: particles path has not default value."\
+							" Will be incampatible with old clients."
 			elif node.attributes["name"].value == "maps":
 				mapsDir = node.attributes["value"].value
+				if mapsDir != "maps/":
+					print "warn: maps path has not default value."\
+							" Will be incampatible with old clients."
 			elif node.attributes["name"].value == "attackSfxFile":
 				attackSfxFile = node.attributes["value"].value
 			elif node.attributes["name"].value == "spriteErrorFile":
@@ -218,7 +245,7 @@ def testDye(id, color, text, src, iserr):
 			continue
 
 		if c != "R" and c != "G" and c != "B" and c != "Y" and c != "M" \
-			and c != "C" and c != "W":
+			and c != "C" and c != "W" and c != "S":
 				showMsg(id, "incorrect dye color: " + c + " in " + text, src, iserr)
 				continue
 		if testDyeInternal(id, col[2:], text, src, iserr) == False:
@@ -267,13 +294,13 @@ def testDyeMark(file, color, text, iserr):
 			continue
 		
 		if c != "R" and c != "G" and c != "B" and c != "Y" and c != "M" \
-			and c != "C" and c != "W":
+			and c != "C" and c != "W" and c != "S":
 			showMsgSprite(file, "dye make incorrect: " + text, iserr)
  			continue
 	return len(colors)
 
 
-def testSprites(id, node, checkGender, isNormalDye, iserr):
+def testSprites(id, node, checkGender, isNormalDye, isMust, checkAction, iserr):
 	try:
 		tmp = node.getElementsByTagName("nosprite")
 		if tmp is not None and len(tmp) > 1:
@@ -281,6 +308,9 @@ def testSprites(id, node, checkGender, isNormalDye, iserr):
 		nosprite = True
 	except:
 		nosprite = False
+
+	if isMust == False:
+		nosprite = True
 
 	try:
 		sprites = node.getElementsByTagName("sprite")
@@ -311,10 +341,11 @@ def testSprites(id, node, checkGender, isNormalDye, iserr):
 			except:
 				variant = 0
 
-			testSprite(id, file, variant, isNormalDye, iserr)
+			testSprite(id, file, variant, isNormalDye, checkAction, iserr)
 		else:
 			male = False
 			female = False
+			unisex = False
 			for sprite in sprites:
 				file = sprite.childNodes[0].data
 				if checkGender:
@@ -331,23 +362,24 @@ def testSprites(id, node, checkGender, isNormalDye, iserr):
 							showMsg(id, "double female sprite tag", "", iserr)
 						female = True
 					elif gender == "unisex":
-						if female == True or male == True:
-							showMsg(id, "gender sprite tag with unisex tag", "", False)
-						male = True
-						female = True
+						unisex = True
 				try:
 					variant = int(sprite.attributes["variant"].value)
 				except:
 					variant = 0
-				testSprite(id, file, variant, isNormalDye, iserr)
+				testSprite(id, file, variant, isNormalDye, checkAction, iserr)
 			if checkGender:
-				if male == False:
+				if male == False and unisex == False:
 					showMsg(id, "no male sprite tag", "",iserr)
-				if female == False:
+				if female == False and unisex == False:
 					showMsg(id, "no female sprite tag", "", iserr)
+				if unisex == True and female == True and male == True:
+					showMsg(id, "gender sprite tag with unisex tag", "", iserr)
+				if unisex == False and male == False and female == False:
+					showMsg(id, "no any gender tags", "", iserr)
+	
 
-
-def testSprite(id, file, variant, isNormalDye, iserr):
+def testSprite(id, file, variant, isNormalDye, checkAction, iserr):
 	global safeDye
 	tmp = splitImage(file)
 	color = tmp[1]
@@ -366,11 +398,16 @@ def testSprite(id, file, variant, isNormalDye, iserr):
 
 		oldSafe = safeDye
 		safeDye = True
-		testSpriteFile(id, fullPath, file, spritesDir + file2, dnum, variant, iserr)
+		testSpriteFile(id, fullPath, file, spritesDir + file2, dnum, variant, checkAction, iserr)
 		safeDye = oldSafe
 
+def powerOfTwo(num):
+	val = 1
+	while val < num:
+		val = val * 2
+	return val
 
-def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
+def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, checkAction, iserr):
 	global safeDye
 	
 	try:
@@ -396,70 +433,137 @@ def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 	if imagesets is None or len(imagesets) < 1:
 		showMsgSprite(fileLoc, "incorrect number of imageset tags", iserr)
 		return
-	imageset = imagesets[0]
-	
-	try:
-		image = imageset.attributes["src"].value
-		image0 = image
-		img = splitImage(image)
-		image = img[0]
-		imagecolor = img[1]
-	except:
-		showMsgSprite(fileLoc, "image attribute not exist: " + image, iserr)
-		return
+	isets = set()
+	imagesetnums = dict()
+	num = 0
+	for imageset in imagesets:
+		try:
+			name = imageset.attributes["name"].value
+		except:
+			showMsgSprite(fileLoc, "imageset don't have name attribute", iserr)
+			name = None
+			
+		if name is not None:
+			if name in isets:
+				showMsgSprite(fileLoc, "imageset with name '" + name + "' already exists", iserr)
+			isets.add(name)
+			
+		image = ""
+		try:
+			image = imageset.attributes["src"].value
+			image0 = image
+			img = splitImage(image)
+			image = img[0]
+			imagecolor = img[1]
+		except:
+			showMsgSprite(fileLoc, "image attribute not exist: " + image, iserr)
+			continue
 
-	try:
-		width = imageset.attributes["width"].value
-	except:
-		showMsgSprite(fileLoc, "no width attribute", iserr)
-		return
+		try:
+			width = imageset.attributes["width"].value
+		except:
+			showMsgSprite(fileLoc, "no width attribute", iserr)
+			continue
 
-	try:
-		height = imageset.attributes["height"].value
-	except:
-		showMsgSprite(fileLoc, "no height attribute", iserr)
+		try:
+			height = imageset.attributes["height"].value
+		except:
+			showMsgSprite(fileLoc, "no height attribute", iserr)
 	
-	if imagecolor != "":
-		num = testDyeMark(fileLoc, imagecolor, image0, iserr)
-		if safeDye == False and dnum != num:
-			if dnum > num:
-				e = iserr
+		if imagecolor != "":
+			num = testDyeMark(fileLoc, imagecolor, image0, iserr)
+			if safeDye == False and dnum != num:
+				if dnum > num:
+					e = iserr
+				else:
+					e = False
+				showMsgSprite(fileLoc, "dye colors size not same in sprite (" + str(num) \
+				+ ") and in caller (" + str(dnum) + ", id=" + str(id) + ")", e)
+		elif safeDye == True and dnum > 0:
+				showMsgSprite(fileLoc, "dye set in sprite but not in caller (id=" + str(id) + ")", False)
+
+
+		fullPath = os.path.abspath(parentDir + "/" + image)
+		if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
+			showMsgSprite(fileLoc, "image file not exist: " + image, iserr)
+			continue
+		sizes = testImageFile(image, fullPath, 0, " " + fileLoc, iserr)
+		s1 = int(sizes[0] / int(width)) * int(width)
+
+		sizesOGL = [0,1]
+		sizesOGL[0] = powerOfTwo(sizes[0])
+		sizesOGL[1] = powerOfTwo(sizes[1])
+
+		if s1 == 0:
+			tmp = int(width)
+		else:
+			tmp = s1
+		if sizes[0] != s1 and tmp != sizesOGL[0] and sizes[0] != sizesOGL[0]: 
+			showMsgSprite(fileLoc, "image width " + str(sizes[0]) + \
+			" (need " + str(tmp) + ") is not multiply to frame size " + width + ", image:" + image, False)
+
+		if sizes[0] != sizesOGL[0]:
+			if sizesOGL[0] > sizes[0]:
+				txt = str(sizesOGL[0] / 2) + " or "
 			else:
-				e = False
-			showMsgSprite(fileLoc, "dye colors size not same in sprite (" + str(num) \
-			+ ") and in caller (" + str(dnum) + ", id=" + str(id) + ")", e)
-	elif safeDye == True and dnum > 0:
-			showMsgSprite(fileLoc, "dye set in sprite but not in caller (id=" + str(id) + ")", False)
+				txt = ""
+
+			if showAll is True:
+				showMsgSprite(fileLoc, "image width should be power of two. If not image will be resized on the fly."\
+					"\nCurrent image width " + str(sizes[0]) + \
+					". used in sprite width " + str(tmp) +
+					"\nallowed width " + txt + str(sizesOGL[0]) + " (" + image + ")", False)
+	
+		s2 = int(sizes[1] / int(height)) * int(height)
+
+		if s2 == 0:
+			tmp = int(height)
+		else:
+			tmp = s2;
+
+		if sizes[1] != s2 and tmp != sizesOGL[1] and sizes[1] != sizesOGL[1]:
+			showMsgSprite(fileLoc, "image height " + str(sizes[1]) + \
+			" (need " + str(tmp) + ") is not multiply to frame size " + height + ", image:" + image, False)
+
+		if sizes[1] != sizesOGL[1]:
+			if sizesOGL[1] > sizes[1]:
+				txt = str(sizesOGL[1] / 2) + " or "
+			else:
+				txt = ""
+
+			if showAll is True:
+				showMsgSprite(fileLoc, "image height should be power of two. If not image will be resized on the fly."\
+					"\nCurrent image height " + str(sizes[1]) + \
+					". used in sprite height " + str(tmp) +
+					"\nallowed height " + txt + str(sizesOGL[1]) + " (" + image + ")", False)
 
 
-	fullPath = os.path.abspath(parentDir + "/" + image)
-	if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
-		showMsgSprite(fileLoc, "image file not exist: " + image, iserr)
-		return
-	sizes = testImageFile(image, fullPath, 0, " " + fileLoc, iserr)
-	s1 = int(sizes[0] / int(width)) * int(width)
-	if sizes[0] != s1:
-		showMsgSprite(fileLoc, "image width " + str(sizes[0]) + \
-		" (need " + str(s1) + ") is not multiply to frame size " + width + ", image:" + image, False)
-	s2 = int(sizes[1] / int(height)) * int(height)
-	if sizes[1] != s2:
-		showMsgSprite(fileLoc, "image height " + str(sizes[1]) + \
-		" (need " + str(s2) + ") is not multiply to frame size " + height + ", image:" + image, False)
+		num = (s1 / int(width)) * (s2 / int(height))
+		if variants == 0 and variant > 0:
+			showMsgSprite(fileLoc, "missing variants attribute in sprite", iserr)
+		if variants > 0 and variant >= variants:
+			showMsgSprite(fileLoc, "variant number more then in variants attribute", iserr)
 
-	num = (s1 / int(width)) * (s2 / int(height))
-	if variants == 0 and variant > 0:
-		showMsgSprite(fileLoc, "missing variants attribute in sprite", iserr)
-	if variants > 0 and variant >= variants:
-		showMsgSprite(fileLoc, "variant number more then in variants attribute", iserr)
-
-	if variant > 0 and variant >= num:
-		showMsgSprite(fileLoc, "to big variant number " + str(variant) \
-		+ ". Frames number " + str(num) + ", id=" + str(id), iserr)
-	if num < 1:
-		showMsgSprite(fileLoc, "image have zero frames: " + image, iserr)
+		if variant > 0 and variant >= num:
+			showMsgSprite(fileLoc, "to big variant number " + str(variant) \
+			+ ". Frames number " + str(num) + ", id=" + str(id), iserr)
+		if num < 1:
+			showMsgSprite(fileLoc, "image have zero frames: " + image, iserr)
+		if name is not None and num > 0:
+			imagesetnums[name] = num
 
 	try:
 		includes = dom.getElementsByTagName("include")
+		for include in includes:
+			try:
+				incfile = include.attributes["file"].value
+				file2 = os.path.abspath(parentDir + os.path.sep + spritesDir + incfile)
+				if not os.path.isfile(file2):
+					showMsgSprite(fileLoc, "include file not exists " + incfile, True)
+			except:
+				showMsgSprite(fileLoc, "bad include", iserr)
+
+
 	except:
 		includes = None
 
@@ -469,6 +573,8 @@ def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 		actions = dom.getElementsByTagName("action")
 	except:
 		actions = None
+
+	foundAction = False
 
 	if (actions == None or len(actions) == 0) and (includes == None or len(includes) == 0):
 		showMsgSprite(fileLoc, "no actions in sprite file", iserr)
@@ -481,7 +587,15 @@ def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 			except:
 				showMsgSprite("no action name", iserr)
 				continue
-
+			try:
+				setname = action.attributes["imageset"].value
+			except:
+				setname = ""
+			if setname in imagesetnums:
+				num = imagesetnums[setname]
+			else:
+				num = 0
+				showMsgSprite(fileLoc, "using incorrect imageset name in action: " + name, iserr)
 			frameSet = frameSet | testSpriteAction(fileLoc, name, action, num, iserr)
 
 			if name in actset:
@@ -499,19 +613,28 @@ def testSpriteFile(id, fullPath, file, fileLoc, dnum, variant, iserr):
 			if len(errIds) > 0:
 				showMsgSprite(fileLoc, "unused frames: " + errIds[0:len(errIds)-1], False)
 
+	if checkAction != "" and checkAction not in actset:
+		showMsgSprite(fileLoc, "no attack action '" + checkAction + "' in sprite", iserr)
+
 
 def testSpriteAction(file, name, action, numframes, iserr):
 	framesid = set()
-	
+
+	lastAttack = None
 	try:
 		animations = action.getElementsByTagName("animation")
 	except:
 		animations = None
 	
 	if animations == None or len(animations) == 0:
-		showMsgSprite(file, "no animation tags in action: " + name, False)
+		if name != "default":
+			showMsgSprite(file, "no animation tags in action: " + name, False)
+		else:
+			return framesid
 
 	aniset = set()
+	delayTags = ("frame", "sequence", "pause")
+
 	for animation in animations:
 		try:
 			direction = animation.attributes["direction"].value
@@ -531,6 +654,20 @@ def testSpriteAction(file, name, action, numframes, iserr):
 		labels = set()
 
 		for node2 in animation.childNodes:
+			if name == "attack" and node2.nodeName != "#text":
+				lastAttack = node2.nodeName
+				
+			if node2.nodeName in delayTags:
+				try:
+					delay = int(node2.attributes["delay"].value)
+				except:
+					delay = 0
+
+				if delay % 10 != 0 and showAll is True:
+					showMsgSprite(file, "delay " + str(delay) + " must be multiple of 10 in action: " + name + \
+							", direction: " + direction, False)
+
+
 			if node2.nodeName == "frame" or node2.nodeName == "sequence":
 				try:
 					offsetX = int(node2.attributes["offsetX"].value)
@@ -550,7 +687,7 @@ def testSpriteAction(file, name, action, numframes, iserr):
 					
 				if idx >= numframes or idx < 0:
 					showMsgSprite(file, "incorrect frame index " + str(idx) + \
-							" aciton: " + name + ", direction: "\
+							" action: " + name + ", direction: "\
 							+ direction, iserr)
 				else:
 					framesid.add(idx)
@@ -558,7 +695,8 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				and offsetY == lastOffsetY:
 					showMsgSprite(file, "duplicate frame animation for frame index=" \
 							+ str(idx) + " action: " + name + \
-							", direction: " + direction, False)
+							", direction: " + direction + "\n" + node2.toxml(), False)
+					#print node2.toxml()
 				else:
 					lastIndex1 = idx
 					lastIndex2 = -1
@@ -569,6 +707,46 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				cnt = cnt + 1
 			elif node2.nodeName == "sequence":
 				sequence = node2
+				try:
+					sframes = dyesplit2.split(sequence.attributes["value"].value)
+				except:
+					sframes = None
+				if sframes is not None:
+					for frm in sframes:
+						if frm != "p":
+							k = frm.find("-")
+							if k == 0 or k == len(frm) - 1:
+								showMsgSprite(file, "incorrect sequence value " + \
+										name + ", direction: " + direction, iserr)
+							elif k == -1:
+								#same as frame
+								idx = int(frm)
+								if idx >= numframes or idx < 0:
+									showMsgSprite(file, "incorrect frame index " + str(idx) + \
+											" action: " + name + ", direction: "\
+											+ direction, iserr)
+								else:
+									framesid.add(idx)
+							else:
+								#same as simple sequence
+								i1 = int(frm[:k])
+								i2 = int(frm[k + 1:])
+								if i1 >= numframes or i1 < 0:
+									showMsgSprite(file, "incorrect start sequence index " + str(i1) + \
+										" action: " + name + ", direction: " + direction, iserr)
+								if i2 >= numframes or i2 < 0:
+									showMsgSprite(file, "incorrect end sequence index " + str(i2) + \
+										" action: " + name + ", direction: " + direction, iserr)
+								if i1 == i2:
+									showMsgSprite(file, "start and end sequence index is same. " \
+										+ "May be better use frame? action: " + \
+										name + ", direction: " + direction, False)
+
+								for i in range(i1,i2 + 1):
+									framesid.add(i)
+					cnt = cnt + 1
+					continue
+				
 				try:
 					i1 = int(sequence.attributes["start"].value)
 					i2 = int(sequence.attributes["end"].value)
@@ -595,13 +773,13 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				and offsetY == lastOffsetY:
 					showMsgSprite(file, "duplicate sequence animation. May be need use repeat attribue? for start=" \
 							+ str(i1) + ", end=" + str(i2) + " action: " + \
-							name + ", direction: " + direction, False)
+							name + ", direction: " + direction + "\n" + node2.toxml(), False)
 				else:
 					lastIndex1 = i1
 					lastIndex2 = i2
 					lastOffsetX = offsetX
 					lastOffsetY = offsetY
-				
+			
 				cnt = cnt + 1
 				for i in range(i1,i2 + 1):
 					framesid.add(i)
@@ -611,6 +789,14 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				lastOffsetX = 0
 				lastOffsetY = 0
 				cnt = cnt + 1
+			elif node2.nodeName == "pause":
+				try:
+					delay = int(node2.attributes["delay"].value)
+				except:
+					delay = 0
+				if delay <= 0:
+					showMsgSprite(file, "incorrect delay in pause tag " + name, iserr)
+
 			elif node2.nodeName == "#text" or node2.nodeName == "#comment":
 				None
 			else:
@@ -632,7 +818,8 @@ def testSpriteAction(file, name, action, numframes, iserr):
 					showMsgSprite(file, "no name attribute in label tag " + name, iserr)
 				else:
 					if label in labels:
-						showMsgSprite(file, "duplicate label " + label + " " + name, iserr)
+						showMsgSprite(file, "duplicate label " + label + " " + name + "\n" \
+							+ node2.toxml(), iserr)
 					else:
 						labels.add(label)
 			elif node2.nodeName == "goto":
@@ -642,7 +829,6 @@ def testSpriteAction(file, name, action, numframes, iserr):
 					label = ""
 				if label == "" or label is None:
 					showMsgSprite(file, "no label attribute in goto tag " + name, iserr)
-
 		if cnt == 0:
 			showMsgSprite(file, "no frames or sequences in action: " + name, iserr)
 
@@ -680,6 +866,10 @@ def testSpriteAction(file, name, action, numframes, iserr):
 				if delay > 0 and delay < 5000:
 					showMsgSprite(file, "last frame\sequence in dead animation have to low limit. Need zero or >5000: " + name, False)
 
+	elif name == "attack":
+		if lastAttack is not None and lastAttack != "end":
+			showMsgSprite(file, "last attack tag should be <end/> or attack animation can be infinite.", False)
+
 	return framesid
 
 
@@ -705,13 +895,14 @@ def testImageFile(file, fullPath, sz, src, iserr):
 			+ "x" + str(sizes[1]) + ") should be (" + str(sz) + "x" \
 			+ str(sz) + ")", False)
 
+				
 
 	return sizes	
 
 def testSound(file, sfxDir):
 	fullPath = parentDir + "/" + sfxDir + file
 	if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
-		print "errin:" + fullPath
+		print "error:" + fullPath
 		showMsgFile(file, "sound file not found", True)
 		return
 	try:
@@ -725,7 +916,11 @@ def testParticle(id, file, src):
 	if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
 		showMsgFile(file, "particle file not found", True)
 		return
-	dom = minidom.parse(fullPath)
+	try:
+		dom = minidom.parse(fullPath)
+	except:
+		showMsgFile(file, "incorrect particle xml file", True)
+		return
 
 	nodes = dom.getElementsByTagName("particle")
 	if len(nodes) < 1:
@@ -864,7 +1059,7 @@ def testItems(fileName, imgDir):
 				errors = errors + 1
 
 			safeDye = True
-			testSprites(id, node, True, True, True)
+			testSprites(id, node, True, True, True, "", True)
 			safeDye = False
 
 		elif type == "racesprite":
@@ -919,7 +1114,7 @@ def testItems(fileName, imgDir):
 					print "error: found attribute floor and tag floor. " + \
 							"Should be only one tag or attribute. id=" + id
 					errors = errors + 1
-				testSprites(id, floorSprite, False, colors is None, err)
+				testSprites(id, floorSprite, False, colors is None, True, "", err)
 
 			fullPath = os.path.abspath(parentDir + "/" + imgDir + image)
 			if not os.path.isfile(fullPath) or os.path.exists(fullPath) == False:
@@ -941,14 +1136,20 @@ def testItems(fileName, imgDir):
 				checkSpriteName(id, drawBefore)
 			if drawAfter != "":
 				checkSpriteName(id, drawAfter)
-				
+
+			try:
+				attackaction = node.attributes["attack-action"].value
+			except:
+				attackaction = ""
+
+			testSprites(id, node, True, colors is None, False, attackaction, True)
 
 			if type != "usable" and type != "unusable" and type != "generic" \
 			and type != "equip-necklace" and type != "equip-1hand" \
 			and type != "equip-2hand" and type != "equip-ammo" \
 			and type != "equip-charm" and type != "equip-neck":
 				err = type != "equip-shield"
-				testSprites(id, node, True, colors is None, err)
+				testSprites(id, node, True, colors is None, True, "", err)
 		elif type == "other":
 			None
 		elif type != "":
@@ -1013,7 +1214,7 @@ def testMonsters(fileName):
 			name = ""
 
 		testTargetCursor(id, node, fileName)
-		testSprites(id, node, False, True, True)
+		testSprites(id, node, False, True, True, "", True)
 		testSounds(id, node, "monster")
 		testParticles(id, node, "particlefx", fileName)
 
@@ -1077,7 +1278,7 @@ def testNpcs(file):
 		else:
 			idset.add(id)
 
-		testSprites(id, node, False, True, True)
+		testSprites(id, node, False, True, True, "", True)
 		testParticles(id, node, "particlefx", file)
 
 def readAttrI(node, attr, dv, msg, iserr):
@@ -1116,6 +1317,17 @@ def testMap(file, path):
 	tilesMap = dict()
 
 	for tileset in dom.getElementsByTagName("tileset"):
+		try:
+			source = tileset.attributes["source"].value
+			if source is not None and source != "":
+				file2 = os.path.abspath(parentDir + os.path.sep + mapsDir + source)
+				if not os.path.isfile(file2):
+					showMsgFile(file, "missing source file in tileset " + source, True)
+
+				continue;
+		except:
+			None
+
 		name = readAttr(tileset, "name", "", "warning: missing tile name: " + file, False)
 		tileWidth = readAttrI(tileset, "tilewidth", mapTileWidth, \
 				"error: missing tile width in tileset: " + name + ", " + file, True)
@@ -1196,6 +1408,8 @@ def testMap(file, path):
 				s1 = int(width / int(tileWidth)) * int(tileWidth)
 
 				if width != s1:
+					if s1 == 0:
+						s1 = int(tileWidth)
 					showMsgFile(file, "image width " + str(width) + \
 							" (need " + str(s1) + ") is not multiply to tile size " + \
 							str(tileWidth) + ". " + source + ", " + name, False)
@@ -1204,6 +1418,8 @@ def testMap(file, path):
 
 				tile.lastGid = tile.firstGid + (int(width / int(tileWidth)) * int(height / int(tileHeight))) - 1
 				if height != s2:
+					if s2 == 0:
+						s2 = int(tileHeight)
 					showMsgFile(file, "image width " + str(height) + \
 							" (need " + str(s2) + ") is not multiply to tile size " + \
 							str(tileHeight) + ". " + source + ", " + name, False)
@@ -1429,7 +1645,7 @@ def showLayerErrors(file, points, msg, iserr):
 
 def getLDV(arr, index):
 	return arr[index] | (arr[index + 1] << 8) | (arr[index + 2] << 16) \
-		    | (arr[index + 3] << 24)
+		| (arr[index + 3] << 24)
 
 
 def getLDV2(arr, x, y, width, height, tilesMap):
@@ -1490,10 +1706,72 @@ def testLayer(file, node, name, width, height, layer, tiles):
 			arr = array.array("B")
 			arr.fromstring(layerData)
 			layer.arr = arr
+#			print file
+#			for item in arr:
+#				print item
+		elif encoding == "csv":
+			if compression != "":
+				showMsgFile(file, "not supported compression " + compression + \
+						" for csv layer format:" + name, True)
+			binData = data.childNodes[0].data.strip()
+			f = StringIO.StringIO(binData)
+			arr = list(csv.reader(f, delimiter=',', quotechar='|'))
+			layer.arr = []
+#			print file
+			for row in arr:
+				try:
+					for item in row:
+						if item != "":
+							nums = splitBytes(int(item))
+							layer.arr.append(nums[0])
+							layer.arr.append(nums[1])
+							layer.arr.append(nums[2])
+							layer.arr.append(nums[3])
+				except:
+					None
+
+			f.close()
+			arr = array.array('i', (layer.arr))
+			layer.arr = arr
+#			for item in arr:
+#				print item
+
+		elif encoding == "":
+			if compression != "":
+				showMsgFile(file, "not supported compression " + compression + \
+						" for xml layer format:" + name, True)
+
+			layer.arr = []
+			tiles = data.getElementsByTagName("tile")
+#			print file
+			for tile in tiles:
+				try:
+					gid = int(tile.attributes["gid"].value)
+				except:
+					showMsgFile(file, "incorrect xml layer format: " + name, True)
+					return layer
+				nums = splitBytes(gid)
+				layer.arr.append(nums[0])
+				layer.arr.append(nums[1])
+				layer.arr.append(nums[2])
+				layer.arr.append(nums[3])
+
+			arr = array.array('i', (layer.arr))
+			layer.arr = arr
+#			for item in arr:
+#				print item
+
 
 			# here may be i should check is tiles correct or not, but i will trust to tiled
 	return layer
 
+
+def splitBytes(num):
+	i1 = int(num % 256)
+	i2 = int(((num % 65536) - i1) / 256)
+	i3 = int(((num % 16777216) - i2 - i1) / 65536)
+	i4 = int(((num % 4294967296) - i3 - i2 - i1) / 16777216)
+	return (i1, i2, i3, i4)
 
 def testLayerGroups(file, layers, collision, tileInfo, tilesMap, iserr):
 	width = 0
@@ -1589,9 +1867,9 @@ def testMaps(dir):
 			testMap(mapsDir + file, dir + file)
 
 def testDefaultFiles():
-	print "Checking defult files"
+	print "Checking default files"
 	testSound(attackSfxFile, sfxDir)
-	testSprite("0", spriteErrorFile, 0, True, True)
+	testSprite("0", spriteErrorFile, 0, True, "", True)
 	testParticle("0", particlesDir + levelUpEffectFile, "levelUpEffectFile")
 	testParticle("0", particlesDir + portalEffectFile, "portalEffectFile")
 	fullName = parentDir + "/" + wallpapersDir + wallpaperFile
@@ -1646,11 +1924,11 @@ def testSpritesDir(dir):
 			testSpritesDir(dir + file + "/")
 		if filtimages.search(file):
 			fullName = parentDir + "/" + spritesDir + dir + file
-			testImageFile(spritesDir + dir, fullName, 0, "", True)
+			testImageFile(spritesDir + dir, fullName, 0, spritesDir + dir + file, True)
 		elif filtxmls.search(file):
 			fullName = dir + file
 			safeDye = True
-			testSprite("0", dir + file, 0, True, True)
+			testSprite("0", dir + file, 0, True, "", True)
 			safeDye = False
 
 
@@ -1774,6 +2052,10 @@ def detectClientData(dirs):
 	print "Cant detect client data directory"
 	exit(1)
 
+
+if len(sys.argv) == 2:
+	if sys.argv[1] == "all":
+		showAll = True
 
 showHeader()
 print "Detecting clientdata dir"
